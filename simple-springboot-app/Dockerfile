@@ -1,15 +1,18 @@
 # ===== BUILD STAGE =====
-FROM eclipse-temurin:17-jdk-alpine AS build
+# Use official Maven + JDK image — no mvnw needed, no stub issues
+FROM maven:3.9.6-eclipse-temurin-17-alpine AS build
 WORKDIR /workspace/app
 
-COPY mvnw .
-COPY .mvn .mvn
+# Copy pom first for dependency caching
 COPY pom.xml .
-COPY src src
+RUN mvn dependency:go-offline -B
 
-RUN chmod +x mvnw && ./mvnw clean package -Dmaven.test.skip=true
+# Copy source and build
+COPY src src
+RUN mvn clean package -Dmaven.test.skip=true -B
 
 # ===== RUN STAGE =====
+# Slim JRE-only image — smaller attack surface for Trivy
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 
