@@ -1,5 +1,5 @@
 trigger:
-  - master
+  - main        # ← was "master", your branch is "main"
 
 pool:
   name: agent-agni
