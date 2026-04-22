@@ -1,0 +1,125 @@
+trigger:
+  - master
+
+pool:
+  name: agent-agni
+
+variables:
+  imageName: java-app
+  acrLoginServer: pavan1219acr.azurecr.io
+  resourceGroup: rg-aks-kv
+  aksCluster: pavan-aks2
+  tag: $(Build.BuildId)
+
+# ================= SONAR =================
+stages:
+- stage: SonarScan
+  jobs:
+  - job: Sonar
+    steps:
+    - task: SonarQubePrepare@7
+      inputs:
+        SonarQube: 'sonar-local'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'java-app'
+        cliProjectName: 'java-app'
+        cliSources: 'simple-springboot-app/src'
+        extraProperties: |
+          sonar.java.binaries=simple-springboot-app/target/classes
+    - script: |
+        cd simple-springboot-app
+        chmod +x mvnw
+        ./mvnw clean compile -Dmaven.test.skip=true
+      displayName: "Compile for Sonar"
+    - task: SonarQubeAnalyze@7
+    - task: SonarQubePublish@7
+      inputs:
+        pollingTimeoutSec: '300'
+
+# ================= TRIVY FS =================
+- stage: TrivyFS
+  dependsOn: SonarScan
+  jobs:
+  - job: ScanFS
+    steps:
+    - script: |
+        cd simple-springboot-app
+        trivy fs . --severity HIGH,CRITICAL --exit-code 0
+      displayName: "Trivy FS Scan"
+
+# ================= BUILD JAR =================
+- stage: BuildJar
+  dependsOn: TrivyFS
+  jobs:
+  - job: Build
+    steps:
+    - script: |
+        cd simple-springboot-app
+        chmod +x mvnw
+        ./mvnw clean package -Dmaven.test.skip=true
+        echo "==== VERIFY JAR ===="
+        ls -l target/*.jar
+      displayName: "Build JAR"
+
+# ================= DOCKER =================
+- stage: DockerBuild
+  dependsOn: BuildJar
+  jobs:
+  - job: Docker
+    steps:
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'pavan1219acr'
+        repository: 'java-app'
+        command: 'buildAndPush'
+        Dockerfile: 'simple-springboot-app/Dockerfile'
+        buildContext: 'simple-springboot-app'
+        tags: |
+          $(tag)
+          latest
+
+# ================= TRIVY IMAGE =================
+- stage: TrivyImage
+  dependsOn: DockerBuild
+  jobs:
+  - job: ScanImage
+    steps:
+    - script: |
+        trivy image $(acrLoginServer)/$(imageName):$(tag) \
+          --severity HIGH,CRITICAL --exit-code 0
+      displayName: "Trivy Image Scan"
+
+# ================= DEPLOY =================
+- stage: Deploy
+  dependsOn: TrivyImage
+  jobs:
+  - job: DeployAKS
+    steps:
+    - task: Kubernetes@1
+      inputs:
+        connectionType: 'Azure Resource Manager'
+        azureSubscriptionEndpoint: 'pavan1219'
+        azureResourceGroup: '$(resourceGroup)'
+        kubernetesCluster: '$(aksCluster)'
+        command: apply
+        useConfigurationFile: true
+        configuration: 'simple-springboot-app/k8s/deployment.yaml'
+    - task: Kubernetes@1
+      inputs:
+        connectionType: 'Azure Resource Manager'
+        azureSubscriptionEndpoint: 'pavan1219'
+        azureResourceGroup: '$(resourceGroup)'
+        kubernetesCluster: '$(aksCluster)'
+        command: apply
+        useConfigurationFile: true
+        configuration: 'simple-springboot-app/k8s/service.yaml'
+    - script: |
+        az aks get-credentials \
+          --resource-group $(resourceGroup) \
+          --name $(aksCluster) --overwrite-existing
+        kubectl set image deployment/java-app \
+          java-app=$(acrLoginServer)/$(imageName):$(tag) \
+          -n default
+        kubectl rollout status deployment/java-app -n default
+      displayName: "Update Image + Verify Rollout"
